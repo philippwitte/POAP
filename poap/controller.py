@@ -195,6 +195,77 @@ class SerialController(Controller):
             self.call_term_callbacks()
 
 
+class SerialSimController(Controller):
+    """Serial optimization controller.
+
+    Attributes:
+        strategy: Strategy for choosing optimization actions.
+        objective: Objective function
+        fevals: Database of function evaluations
+        skip: if True, skip over "None" proposals
+    """
+
+    def __init__(self, simulator, objective, skip=False):
+        """Initialize the controller.
+
+        Args:
+            objective: Objective function
+            skip: if True, skip over "None" proposals
+        """
+        Controller.__init__(self)
+        self.simulator = simulator  # TODO add simulator here
+        self.objective = objective
+        self.skip = skip
+
+    def _run(self, merit=None, filter=None, reraise=True):
+        "Run the optimization and return the best value."
+        while True:
+            proposal = self.strategy.propose_action()
+            if not proposal:
+                if not self.skip:
+                    raise NameError('No proposed action')
+            elif proposal.action == 'terminate':
+                logger.debug("Accept termination proposal")
+                proposal.accept()
+                return self.best_point(merit=merit, filter=filter)
+            elif proposal.action == 'eval':
+                logger.debug("Accept eval proposal")
+                proposal.record = self.new_feval(proposal.args)
+                proposal.accept()
+                try:
+                    state = self.simulator(*proposal.record.params) # TODO eval simulator first, then plug into objective
+                    value = self.objective(state)
+                    proposal.record.complete(value, state)
+                except Exception:
+                    logger.exception("Error calling objective", \
+                                     exc_info=sys.exc_info())
+                    proposal.record.cancel()
+                    if reraise:
+                        raise
+            else:
+                logger.debug("Reject proposal")
+                proposal.reject()
+
+    def run(self, merit=None, filter=None, reraise=True):
+        """Run the optimization and return the best value.
+
+        Args:
+            merit: Function to minimize (default is r.value)
+            filter: Predicate to use for filtering candidates
+            reraise: Flag indicating whether exceptions in the
+              objective function evaluations should be re-raised,
+              terminating the optimization.
+
+        Returns:
+            Record minimizing merit() and satisfying filter();
+            or None if nothing satisfies the filter
+        """
+        try:
+            return self._run(merit=merit, filter=filter, reraise=reraise)
+        finally:
+            self.call_term_callbacks()
+
+
 class ThreadController(Controller):
     """Thread-based optimization controller.
 
@@ -405,10 +476,10 @@ class BaseWorkerThread(threading.Thread):
         logger.debug("Worker thread is ready")
         self.controller.add_worker(self)
 
-    def finish_success(self, record, value):
+    def finish_success(self, record, value, state=None):
         "Finish successful work on a record and add ourselves back."
         logger.debug("Finished feval successfully")
-        self.add_message(lambda: record.complete(value))
+        self.add_message(lambda: record.complete(value, state=state))
         self.add_worker()
 
     def finish_killed(self, record):
@@ -478,6 +549,32 @@ class BasicWorkerThread(BaseWorkerThread):
             self.finish_cancelled(record)
             logger.debug("Worker feval exited with exception")
 
+
+class BasicWorkerSimThread(BaseWorkerThread):
+    """Basic worker for use with the thread controller.
+
+    The BasicWorkerThread calls a Python objective function
+    when asked to do an evaluation.  This is concurrent, but only
+    results in parallelism if the objective function implementation
+    itself allows parallelism (e.g. because it communicates with
+    an external entity via a pipe, socket, or whatever).
+    """
+
+    def __init__(self, controller, objective=None, simulator=None):
+        "Initialize the worker."
+        super(BasicWorkerSimThread, self).__init__(controller)
+        self.objective = objective
+        self.simulator = simulator
+
+    def handle_eval(self, record):
+        try:
+            state = self.simulator(*record.params)
+            value = self.objective(state)
+            self.finish_success(record, value, state)
+            logger.debug("Worker finished feval successfully")
+        except Exception:
+            self.finish_cancelled(record)
+            logger.debug("Worker feval exited with exception")
 
 class ProcessWorkerThread(BaseWorkerThread):
     """Subprocess worker for use with the thread controller.

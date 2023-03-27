@@ -125,6 +125,7 @@ class EvalRecord(object):
         self.extra_args = extra_args
         self._status = status
         self.value = None
+        self.state = None   # TODO Add state var for PDE solution
         self.callbacks = []
 
     def add_callback(self, callback):
@@ -173,12 +174,12 @@ class EvalRecord(object):
         assert not self.is_done, "Cannot change complete to cancelled"
         self.update(_status='cancelled')
 
-    def complete(self, value):
+    def complete(self, value, state=None):
         "Change status to 'completed' and execute callbacks."
         if self.is_done:
             logger.error("Cannot update record that is done [complete]")
         assert not self.is_done, "Cannot re-complete"
-        self.update(_status='completed', value=value)
+        self.update(_status='completed', value=value, state=state)  # also update state
 
     @property
     def status(self):
